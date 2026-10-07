@@ -125,8 +125,12 @@
 <script>
   // Agar allaqachon login qilingan bo'lsa dashboard'ga o'tkazish
   (function() {
-    const sess = sessionStorage.getItem('fin_session');
-    if (sess) window.location.href = 'finance_dashboard.html';
+    const sess = sessionStorage.getItem('fin_session') || localStorage.getItem('fin_session');
+    if (sess) {
+      // sessionStorage ga ham yozish
+      if (!sessionStorage.getItem('fin_session')) sessionStorage.setItem('fin_session', sess);
+      window.location.href = 'finance_dashboard.html';
+    }
   })();
 
   let mode = 'login';
@@ -177,6 +181,31 @@
     txt.innerHTML = loading ? '<span style="display:inline-block;width:18px;height:18px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite"></span>' : (btnId === 'login-btn' ? 'Kirish →' : 'Hisob yaratish →');
   }
 
+  const API_BASE = 'https://finapp-production-52be.up.railway.app';
+  const API_KEY  = 'finapp2024secret';
+
+  async function apiLogin(username, password) {
+    try {
+      const r = await fetch(`${API_BASE}/api/login`, {
+        method: 'POST',
+        headers: { 'X-API-Key': API_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username.toLowerCase(), password }),
+      });
+      return await r.json();
+    } catch { return null; }
+  }
+
+  async function apiRegister(username, password) {
+    try {
+      const r = await fetch(`${API_BASE}/api/register`, {
+        method: 'POST',
+        headers: { 'X-API-Key': API_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: username.toLowerCase(), password }),
+      });
+      return await r.json();
+    } catch { return null; }
+  }
+
   function doLogin(e) {
     e.preventDefault();
     clearErrors();
@@ -186,15 +215,41 @@
     if (!pass) { showErr('l-pass-err', 'Parolni kiriting'); document.getElementById('l-pass').classList.add('error'); return; }
 
     setLoading('login-btn', 'login-btn-text', true);
-    setTimeout(() => {
+
+    // 1. Avval API serverdan tekshirish
+    apiLogin(user, pass).then(apiRes => {
+      if (apiRes && apiRes.ok) {
+        // API dan kelgan user ni localga ham saqlash
+        const localUsers = Auth.getUsers();
+        const uname = user.trim().toLowerCase();
+        if (!localUsers.find(u => u.username === uname)) {
+          localUsers.push({
+            id: apiRes.user.id,
+            username: uname,
+            displayName: apiRes.user.displayName,
+            password: pass,
+            passwordHash: Auth._hash(pass),
+            createdAt: new Date().toISOString(),
+          });
+          Auth.saveUsers(localUsers);
+        }
+        // API URL ni saqlash
+        localStorage.setItem('fin_api_url', API_BASE);
+        setLoading('login-btn', 'login-btn-text', false);
+        Auth.setSession(apiRes.user);
+        const devKey = 'fin_device_' + apiRes.user.id;
+        window.location.href = localStorage.getItem(devKey) ? 'finance_dashboard.html' : 'finance_device.html';
+        return;
+      }
+
+      // 2. API ishlamasa lokal tekshirish
       const res = Auth.login(user, pass);
       setLoading('login-btn', 'login-btn-text', false);
       if (!res.ok) { showErr('l-general-err', '❌ ' + res.msg); return; }
       Auth.setSession(res.user);
-      // Login: qurilma tanlanganmi?
       const devKey = 'fin_device_' + res.user.id;
       window.location.href = localStorage.getItem(devKey) ? 'finance_dashboard.html' : 'finance_device.html';
-    }, 600);
+    });
   }
 
   function doRegister(e) {
@@ -223,20 +278,36 @@
     if (!valid) return;
 
     setLoading('reg-btn', 'reg-btn-text', true);
-    setTimeout(() => {
+
+    // API ga ham ro'yxatdan o'tkazish
+    apiRegister(user, pass).then(apiRes => {
+      if (apiRes && !apiRes.ok && apiRes.error && apiRes.error.includes('band')) {
+        setLoading('reg-btn', 'reg-btn-text', false);
+        showErr('r-general-err', '❌ Bu username allaqachon band!');
+        return;
+      }
+      // Lokal ham saqlash
       const res = Auth.register(user, pass);
       setLoading('reg-btn', 'reg-btn-text', false);
       if (!res.ok) { showErr('r-general-err', '❌ ' + res.msg); return; }
+      localStorage.setItem('fin_api_url', API_BASE);
       Auth.setSession(res.user);
-      // Yangi foydalanuvchi — qurilma tanlashga
       window.location.href = 'finance_device.html';
-    }, 700);
+    });
   }
 
   // Spin animatsiyasi
   const style = document.createElement('style');
   style.textContent = '@keyframes spin{to{transform:rotate(360deg)}}';
   document.head.appendChild(style);
+
+  // Saqlangan sessiyani tozalash (agar muammo bo'lsa)
+  document.addEventListener('DOMContentLoaded', () => {
+    // fin_db.json xatosini oldini olish
+    if (typeof TelegramSync !== 'undefined') {
+      TelegramSync.stopPolling && TelegramSync.stopPolling();
+    }
+  });
 </script>
 </body>
 </html>

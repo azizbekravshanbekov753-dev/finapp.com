@@ -33,6 +33,19 @@ const Auth = {
     };
     users.push(user);
     this.saveUsers(users);
+
+    // API serverga ham saqlash
+    try {
+      const base = TelegramSync.getApiUrl();
+      if (base) {
+        fetch(`${base}/api/register`, {
+          method: 'POST',
+          headers: { 'X-API-Key': 'finapp2024secret', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        }).catch(() => {});
+      }
+    } catch(e) {}
+
     return { ok: true, user };
   },
 
@@ -41,26 +54,45 @@ const Auth = {
     username = username.trim().toLowerCase();
     const users = this.getUsers();
     const user = users.find(u => u.username === username);
-    if (!user) return { ok: false, msg: "Foydalanuvchi topilmadi" };
-    if (user.password && user.password === password) return { ok: true, user };
-    if (user.passwordHash && user.passwordHash === this._hash(password)) return { ok: true, user };
+
+    // 1. Avval localdan tekshirish
+    if (user) {
+      if (user.password && user.password === password) return { ok: true, user };
+      if (user.passwordHash && user.passwordHash === this._hash(password)) return { ok: true, user };
+    }
+
+    // 2. API serverdan tekshirish (bot orqali ochilgan akkount bo'lishi mumkin)
+    // Bu async, shuning uchun server tekshiruvi alohida
+    if (!user) return { ok: false, msg: "Foydalanuvchi topilmadi. Avval ro'yxatdan o'ting." };
     return { ok: false, msg: "Parol noto'g'ri" };
   },
 
   // Sessiyani saqlash
   setSession(user) {
-    sessionStorage.setItem('fin_session', JSON.stringify({ id: user.id, username: user.username, displayName: user.displayName }));
+    const data = JSON.stringify({ id: user.id, username: user.username, displayName: user.displayName });
+    sessionStorage.setItem('fin_session', data);
+    localStorage.setItem('fin_session', data); // Brauzer yopilsa ham saqlansin
   },
 
   // Joriy foydalanuvchi
   current() {
-    try { return JSON.parse(sessionStorage.getItem('fin_session')); }
+    try {
+      // Avval sessionStorage, keyin localStorage
+      const s = sessionStorage.getItem('fin_session') || localStorage.getItem('fin_session');
+      const user = s ? JSON.parse(s) : null;
+      // sessionStorage ga ham yozish (agar faqat localStorage da bo'lsa)
+      if (user && !sessionStorage.getItem('fin_session')) {
+        sessionStorage.setItem('fin_session', JSON.stringify(user));
+      }
+      return user;
+    }
     catch { return null; }
   },
 
   // Chiqish
   logout() {
     sessionStorage.removeItem('fin_session');
+    localStorage.removeItem('fin_session');
     window.location.href = 'finance_auth.html';
   },
 
@@ -394,11 +426,14 @@ const InputHandler = {
     if (!p.amount) { Toast.show("Summa topilmadi! Masalan: \"Non 5000\" yoki \"Do'stimga 50000 qarz berdim 5 kunda\"", 'warn'); return; }
 
     if (p.type === 'expense') {
-      DB.add('expenses', { id: Utils.uid(), description: p.description, amount: p.amount, category: p.category, date: Utils.today(), createdAt: new Date().toISOString() });
+      const item = { id: Utils.uid(), description: p.description, amount: p.amount, category: p.category, date: Utils.today(), createdAt: new Date().toISOString() };
+      DB.add('expenses', item);
+      try { TelegramSync.pushExpense(item); } catch(e) {}
       Toast.show(`Saqlandi: ${Utils.fmtMoney(p.amount)}`, 'ok');
     } else {
       const debt = { id: Utils.uid(), type: p.type, description: p.description, amount: p.amount, person: p.person, deadline: p.deadline, date: Utils.today(), createdAt: new Date().toISOString(), paid: false };
       DB.add('debts', debt);
+      try { TelegramSync.pushDebt(debt); } catch(e) {}
       if (p.deadline) Notifs.add({ type: 'info', title: `📋 ${p.description}`, msg: `${Utils.fmtMoney(p.amount)} — Muddat: ${Utils.fmtDate(p.deadline)}`, relatedId: debt.id });
       Toast.show(`Qarz saqlandi: ${Utils.fmtMoney(p.amount)}`, 'ok');
     }
@@ -467,7 +502,8 @@ const App = {
     try { SW.register(); }            catch(e) {}
     try { Currency.fetchRates(); }    catch(e) {}
     try { Achievements.check(); }     catch(e) {}
-    try { TelegramSync.startPolling(); } catch(e) {}
+    // TelegramSync faqat Railway serverda ishlaydi
+    // try { TelegramSync.startPolling(); } catch(e) {}
     try { PrivacyMode.init(); }       catch(e) {}
     try { FinBot.renderFAB(); }       catch(e) {}
   },
@@ -1087,139 +1123,161 @@ const Onboarding = {
 
 
 /* ════════════════════════════════════════════
-   TELEGRAM SYNC — fin_db.json orqali bot bilan sinxronlash
-   ════════════════════════════════════════════
-   bot.py DB kaliti formati:
-     foydalanuvchi xarajatlari → fin_db.json["u_ali_expenses"]
-     foydalanuvchi qarzlari    → fin_db.json["u_ali_debts"]
-     bu saytdagi localStorage  → localStorage["u_ali_expenses"]
+   API SYNC — server.py orqali sayt + bot sinxronlash
    ════════════════════════════════════════════ */
 const TelegramSync = {
-  _timer: null,
+  _timer:    null,
   _lastHash: '',
+  _apiUrl:   null,
+  _apiKey:   'finapp2024secret',
 
+  /* API URL ni aniqlash */
+  getApiUrl() {
+    if (this._apiUrl) return this._apiUrl;
+    // 1. localStorage dan oldin saqlangan URL
+    const saved = localStorage.getItem('fin_api_url');
+    if (saved) { this._apiUrl = saved; return saved; }
+    // 2. Sayt Railway da joylashgan bo'lsa — o'zi
+    if (location.hostname.includes('railway.app')) {
+      this._apiUrl = location.origin;
+      return this._apiUrl;
+    }
+    // 3. GitHub Pages — API URL yo'q, sinxron ishlamaydi
+    return null;
+  },
+
+  /* API URL ni o'rnatish (sozlamalardan) */
+  setApiUrl(url) {
+    this._apiUrl = url.trim().replace(/\/$/, '');
+    localStorage.setItem('fin_api_url', this._apiUrl);
+  },
+
+  /* Sarlavha */
+  _headers() {
+    return { 'X-API-Key': this._apiKey, 'Content-Type': 'application/json' };
+  },
+
+  /* API orqali login/register tekshirish */
+  async verifyOnServer(username, password) {
+    const base = this.getApiUrl();
+    if (!base) return null;
+    try {
+      const r = await fetch(`${base}/api/login`, {
+        method: 'POST',
+        headers: this._headers(),
+        body: JSON.stringify({ username, password }),
+      });
+      const d = await r.json();
+      return d.ok ? d.user : null;
+    } catch { return null; }
+  },
+
+  async registerOnServer(username, password) {
+    const base = this.getApiUrl();
+    if (!base) return null;
+    try {
+      const r = await fetch(`${base}/api/register`, {
+        method: 'POST',
+        headers: this._headers(),
+        body: JSON.stringify({ username, password }),
+      });
+      const d = await r.json();
+      return d.ok ? d.user : (d.error || null);
+    } catch { return null; }
+  },
+
+  /* Serverga xarajat yuborish */
+  async pushExpense(exp) {
+    const base = this.getApiUrl();
+    if (!base) return;
+    const u = Auth.current();
+    if (!u) return;
+    try {
+      await fetch(`${base}/api/expenses`, {
+        method: 'POST',
+        headers: this._headers(),
+        body: JSON.stringify({ ...exp, userId: u.id }),
+      });
+    } catch {}
+  },
+
+  /* Serverga qarz yuborish */
+  async pushDebt(debt) {
+    const base = this.getApiUrl();
+    if (!base) return;
+    const u = Auth.current();
+    if (!u) return;
+    try {
+      await fetch(`${base}/api/debts`, {
+        method: 'POST',
+        headers: this._headers(),
+        body: JSON.stringify({ ...debt, userId: u.id }),
+      });
+    } catch {}
+  },
+
+  /* Serverdan yangi ma'lumotlarni olish */
   async sync() {
-    // Faqat http(s) da ishlaydi, file:// da o'tkazib yuboriladi
-    if (!location.protocol.startsWith('http')) return;
-
+    const base = this.getApiUrl();
+    if (!base) return;
     const u = Auth.current();
     if (!u) return;
 
     try {
-      const res = await fetch('fin_db.json?t=' + Date.now());
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data) return;
+      // Serverga barcha local ma'lumotlarni yuborish va yangilarini olish
+      const myExps  = DB.get('expenses');
+      const myDebts = DB.get('debts');
 
-      // ── 1. Telegramda yaratilgan foydalanuvchilarni saytga qo'shish ──
-      if (Array.isArray(data.users)) {
-        const localUsers = Auth.getUsers();
-        const known = new Set(localUsers.map(x => x.username.toLowerCase()));
-        let changed = false;
-        data.users.forEach(du => {
-          if (!du.username) return;
-          const uname = du.username.toLowerCase();
-          if (!known.has(uname)) {
-            localUsers.push({
-              id:           du.id || ('u_' + uname),
-              username:     uname,
-              displayName:  du.displayName || (uname[0].toUpperCase() + uname.slice(1)),
-              password:     du.password     || '',
-              passwordHash: du.passwordHash || (du.password ? Auth._hash(du.password) : ''),
-              createdAt:    du.createdAt    || new Date().toISOString(),
-            });
-            known.add(uname);
-            changed = true;
-          }
-        });
-        if (changed) Auth.saveUsers(localUsers);
-      }
+      const r = await fetch(`${base}/api/sync`, {
+        method: 'POST',
+        headers: this._headers(),
+        body: JSON.stringify({
+          userId:   u.id,
+          expenses: myExps,
+          debts:    myDebts,
+        }),
+      });
+      if (!r.ok) return;
+      const data = await r.json();
+      if (!data.ok) return;
 
-      // ── 2. Bot yozgan xarajatlarni localStorage ga o'tkazish ──
-      //   bot.py kaliti: "u_ali_expenses"
-      //   sayt kaliti  : localStorage["u_ali_expenses"]  (DB._uid() + "expenses")
-      const dbKey   = u.id + '_';               // masalan "u_ali_"
-      const tgExpKey  = u.id + '_expenses';     // "u_ali_expenses"
-      const tgDebtKey = u.id + '_debts';        // "u_ali_debts"
-
-      const tgExps  = Array.isArray(data[tgExpKey])  ? data[tgExpKey]  : [];
-      const tgDebts = Array.isArray(data[tgDebtKey]) ? data[tgDebtKey] : [];
-
-      // Hash tekshirish — o'zgarish bo'lmasa UI yangilanmasin
-      const newHash = JSON.stringify([tgExps.map(e=>e.id), tgDebts.map(d=>d.id)]);
+      // Hash tekshirish
+      const newHash = JSON.stringify([
+        (data.expenses||[]).map(e=>e.id),
+        (data.debts||[]).map(d=>d.id),
+      ]);
       if (newHash === this._lastHash) return;
       this._lastHash = newHash;
 
-      let updated = false;
-
-      // Xarajatlar
-      const myExp = DB.get('expenses');
-      const expIds = new Set(myExp.map(e => e.id));
-      tgExps.forEach(e => {
-        if (!e.id || expIds.has(e.id)) return;
-        myExp.unshift({
-          id:          e.id,
-          description: e.description || 'Telegram xarajati',
-          amount:      Number(e.amount) || 0,
-          category:    e.category || 'other',
-          note:        e.note    || '',
-          date:        e.date    || Utils.today(),
-          createdAt:   e.createdAt || new Date().toISOString(),
-          source:      'telegram',
-        });
-        expIds.add(e.id);
-        updated = true;
-      });
-      if (updated) DB.set('expenses', myExp);
-
-      // Qarzlar
-      let debtUpdated = false;
-      const myDebts = DB.get('debts');
-      const debtIds = new Set(myDebts.map(d => d.id));
-      tgDebts.forEach(d => {
-        if (!d.id || debtIds.has(d.id)) return;
-        myDebts.unshift({
-          id:          d.id,
-          type:        d.type        || 'debt_out',
-          description: d.description || 'Telegram qarzi',
-          amount:      Number(d.amount) || 0,
-          person:      d.person    || '',
-          deadline:    d.deadline  || null,
-          daysCount:   d.daysCount || 0,
-          note:        d.note      || '',
-          date:        d.date      || Utils.today(),
-          createdAt:   d.createdAt || new Date().toISOString(),
-          paid:        !!d.paid,
-          source:      'telegram',
-        });
-        debtIds.add(d.id);
-        debtUpdated = true;
-      });
-      if (debtUpdated) DB.set('debts', myDebts);
-
-      // Yangi ma'lumot kelgan bo'lsa UI yangilash
-      if (updated || debtUpdated) {
-        const count = (updated ? tgExps.filter(e=>!expIds.has(e.id)).length : 0)
-                    + (debtUpdated ? tgDebts.filter(d=>!debtIds.has(d.id)).length : 0);
-        App.refresh();
-        if (typeof pageRefresh === 'function') pageRefresh();
-        // Faqat bir marta bildirish
-        if (typeof Toast !== 'undefined') {
-          Toast.show(`📱 Telegramdan ${updated ? 'xarajat' : ''}${debtUpdated ? ' qarz' : ''} keldi ✅`, 'ok', 3000);
-        }
-        // Badge yangilash
-        if (typeof Notifs !== 'undefined') Notifs.checkDeadlines();
+      // Yangi kelgan xarajatlar
+      const expIds  = new Set(myExps.map(e=>e.id));
+      const newExps = (data.expenses||[]).filter(e=>!expIds.has(e.id));
+      if (newExps.length) {
+        const merged = [...newExps, ...myExps];
+        DB.set('expenses', merged);
       }
 
-    } catch (err) {
-      // Tarmoq xatosi yoki file:// — jim o'tkazib yuborish
-    }
+      // Yangi kelgan qarzlar
+      const debtIds  = new Set(myDebts.map(d=>d.id));
+      const newDebts = (data.debts||[]).filter(d=>!debtIds.has(d.id));
+      if (newDebts.length) {
+        const merged = [...newDebts, ...myDebts];
+        DB.set('debts', merged);
+      }
+
+      if (newExps.length || newDebts.length) {
+        App.refresh();
+        if (typeof pageRefresh === 'function') pageRefresh();
+        Toast.show(`📱 Telegramdan yangi ma'lumot keldi ✅`, 'ok', 3000);
+      }
+
+    } catch {}
   },
 
   startPolling() {
-    if (this._timer) return; // ikki marta ishga tushmasligi uchun
+    if (this._timer) return;
     this.sync();
-    this._timer = setInterval(() => this.sync(), 3000);
+    this._timer = setInterval(() => this.sync(), 5000);
   },
 
   stopPolling() {
@@ -1338,9 +1396,16 @@ const Wallets = {
     const list = this.getAll();
     const w = list.find(x => x.id === id);
     if (w) {
-      w.balance = (Number(w.balance) || 0) + delta;
+      const newBalance = (Number(w.balance) || 0) + delta;
+      // Manfiy balansga ruxsat bermaslik
+      if (delta < 0 && newBalance < 0) {
+        return { ok: false, msg: `Mablag' yetarli emas! Balans: ${(Number(w.balance)||0).toLocaleString('uz-UZ')} so'm` };
+      }
+      w.balance = newBalance;
       this.save(list);
+      return { ok: true };
     }
+    return { ok: false, msg: 'Hamyon topilmadi' };
   },
   transfer(fromId, toId, amount, note = '') {
     amount = Number(amount) || 0;

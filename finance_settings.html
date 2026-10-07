@@ -215,7 +215,28 @@
         </div>
       </div>
 
-      <!-- Xavfli zona -->
+      <!-- API Server -->
+      <div class="settings-section">
+        <div class="ss-title">🔗 API Server (Bot bilan sinxron)</div>
+        <div class="ss-row">
+          <span class="ss-ico">🌐</span>
+          <div class="ss-info">
+            <div class="ss-lbl">Railway API URL</div>
+            <div class="ss-desc" id="api-url-desc">Bot va sayt bir xil ma'lumot ishlatishi uchun</div>
+          </div>
+        </div>
+        <div style="padding:0 20px 16px">
+          <div style="display:flex;gap:8px">
+            <input type="text" id="api-url-input" class="finp" 
+              placeholder="https://finapp-production-52be.up.railway.app"
+              style="flex:1"/>
+            <button class="btn btn-primary btn-sm" onclick="saveApiUrl()">Saqlash</button>
+          </div>
+          <div style="font-size:11px;color:var(--t3);margin-top:6px" id="api-status">
+            Yuklanmoqda...
+          </div>
+        </div>
+      </div>
       <div class="settings-section" style="border-color:rgba(239,68,68,.2)">
         <div class="ss-title" style="color:var(--red)">⚠️ Xavfli zona</div>
         <div class="ss-row">
@@ -291,6 +312,12 @@
     // Export oy
     document.getElementById('export-month').value = Utils.today().slice(0,7);
 
+    // API URL
+    const apiUrl = TelegramSync.getApiUrl() || '';
+    const apiInp = document.getElementById('api-url-input');
+    if (apiInp) apiInp.value = apiUrl;
+    checkApiStatus();
+
     // Achievements
     renderAchievements();
   }
@@ -318,7 +345,44 @@
     if(rate) el.textContent = `1 ${cur} ≈ ${Math.round(rate).toLocaleString('uz-UZ')} so'm`;
   }
 
-  function toggleTheme(cb){
+  function saveApiUrl() {
+    const url = document.getElementById('api-url-input').value.trim();
+    if (!url) { Toast.show('URL kiriting!', 'warn'); return; }
+    TelegramSync.setApiUrl(url);
+    checkApiStatus();
+    Toast.show('API URL saqlandi ✅', 'ok');
+  }
+
+  async function checkApiStatus() {
+    const url = TelegramSync.getApiUrl();
+    const el  = document.getElementById('api-status');
+    const inp = document.getElementById('api-url-input');
+    if (!url) {
+      el.textContent = '❌ API URL kiritilmagan';
+      el.style.color = 'var(--red)';
+      return;
+    }
+    if (inp) inp.value = url;
+    el.textContent = 'Tekshirilmoqda...';
+    el.style.color = 'var(--t3)';
+    try {
+      const r = await fetch(url + '/api/health', { 
+        headers: { 'X-API-Key': 'finapp2024secret' },
+        signal: AbortSignal.timeout(5000) 
+      });
+      const d = await r.json();
+      if (d.ok) {
+        el.textContent = `✅ Server ishlayapti — ${d.users} ta foydalanuvchi`;
+        el.style.color = 'var(--green)';
+      } else {
+        el.textContent = '❌ Server javob bermadi';
+        el.style.color = 'var(--red)';
+      }
+    } catch {
+      el.textContent = '❌ Server bilan bog\'lanib bo\'lmadi';
+      el.style.color = 'var(--red)';
+    }
+  }
     Theme.set(cb.checked ? 'light' : 'dark');
     document.getElementById('theme-desc').textContent = cb.checked ? 'Light rejim faol' : 'Dark rejim faol';
     Toast.show(cb.checked?'☀️ Light rejim':'🌙 Dark rejim','info');
@@ -414,10 +478,22 @@
 
   function clearAllData(){
     if(!confirm("BARCHA ma'lumotlarni o'chirishni istaysizmi? Bu amalni ortga qaytarib bo'lmaydi!"))return;
-    if(!confirm("Haqiqatan ham? Xarajatlar, qarzlar, maqsadlar, hamyonlar, bildirishnomalar, byudjetlar — hammasi o'chadi!"))return;
-    ['expenses','debts','notifs','budgets','recurring','splits','goals','wallets','transfers'].forEach(k=>DB.set(k,[]));
-    Toast.show('Barcha ma\'lumotlar to\'liq tozalandi ✅','info');
-    setTimeout(()=>window.location.href='finance_dashboard.html',1500);
+    if(!confirm("Haqiqatan ham? Xarajatlar, qarzlar, maqsadlar, hamyonlar, bildirishnomalar — hammasi o'chadi!"))return;
+    
+    const u = Auth.current();
+    if (u) {
+      // Faqat shu foydalanuvchining ma'lumotlarini o'chirish
+      const prefix = u.id + '_';
+      Object.keys(localStorage).forEach(key => {
+        if (key.startsWith(prefix)) localStorage.removeItem(key);
+      });
+      // Qurilma va onboarding sozlamalarini ham o'chirish
+      localStorage.removeItem('fin_device_' + u.id);
+      localStorage.removeItem('fin_ob_' + u.id);
+    }
+    
+    Toast.show("Barcha ma'lumotlar tozalandi ✅", 'ok');
+    setTimeout(() => window.location.href = 'finance_dashboard.html', 1200);
   }
 
   document.getElementById('report-modal').addEventListener('click',e=>{if(e.target===document.getElementById('report-modal'))document.getElementById('report-modal').classList.remove('show');});
