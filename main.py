@@ -499,7 +499,11 @@ async def cmd_cancel(u,c):
     await u.message.reply_text("❌ Bekor. /start"); c.user_data.clear(); return ConversationHandler.END
 
 def run_bot():
-    if not TOKEN: log.error("BOT_TOKEN yo'q!"); return
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    if not TOKEN:
+        log.error("BOT_TOKEN yo'q!"); return
     tgapp=ApplicationBuilder().token(TOKEN).concurrent_updates(True).build()
     conv=ConversationHandler(
         entry_points=[CommandHandler("start",cmd_start)],
