@@ -504,8 +504,7 @@ def run_bot():
     asyncio.set_event_loop(loop)
     if not TOKEN:
         log.error("BOT_TOKEN yo'q!"); return
-    tgapp=ApplicationBuilder().token(TOKEN).concurrent_updates(True).build()
-    conv=ConversationHandler(
+    tgapp=ApplicationBuilder().token(TOKEN).concurrent_updates(True).build()    conv=ConversationHandler(
         entry_points=[CommandHandler("start",cmd_start)],
         states={
             ST_AUTH:[CallbackQueryHandler(on_auth,pattern="^(do_login|do_reg)$")],
@@ -533,14 +532,62 @@ def run_bot():
     log.info("🤖 Bot ishga tushdi!")
     tgapp.run_polling(drop_pending_updates=True)
 
+async def run_bot_async():
+    if not TOKEN:
+        log.error("BOT_TOKEN yo'q!"); return
+    tgapp=ApplicationBuilder().token(TOKEN).concurrent_updates(True).build()
+    conv=ConversationHandler(
+        entry_points=[CommandHandler("start",cmd_start)],
+        states={
+            ST_AUTH:[CallbackQueryHandler(on_auth,pattern="^(do_login|do_reg)$")],
+            ST_REG_U:[MessageHandler(filters.TEXT&~filters.COMMAND,reg_u)],
+            ST_REG_P:[MessageHandler(filters.TEXT&~filters.COMMAND,reg_p)],
+            ST_REG_P2:[MessageHandler(filters.TEXT&~filters.COMMAND,reg_p2)],
+            ST_LOG_U:[MessageHandler(filters.TEXT&~filters.COMMAND,log_u)],
+            ST_LOG_P:[MessageHandler(filters.TEXT&~filters.COMMAND,log_p)],
+            ST_MAIN:[CallbackQueryHandler(on_main)],
+            ST_EN:[MessageHandler(filters.TEXT&~filters.COMMAND,en)],
+            ST_EA:[MessageHandler(filters.TEXT&~filters.COMMAND,ea)],
+            ST_EC:[CallbackQueryHandler(ec,pattern="^cat_")],
+            ST_ENOTE:[CallbackQueryHandler(enote_skip,pattern="^skip$"),MessageHandler(filters.TEXT&~filters.COMMAND,enote_txt)],
+            ST_DT:[CallbackQueryHandler(dt,pattern="^dt_")],
+            ST_DW:[MessageHandler(filters.TEXT&~filters.COMMAND,dw)],
+            ST_DA:[MessageHandler(filters.TEXT&~filters.COMMAND,da)],
+            ST_DP:[CallbackQueryHandler(dp_skip,pattern="^skip$"),MessageHandler(filters.TEXT&~filters.COMMAND,dp_txt)],
+            ST_DD:[CallbackQueryHandler(dd_skip,pattern="^skip$"),MessageHandler(filters.TEXT&~filters.COMMAND,dd_txt)],
+            ST_DNOTE:[CallbackQueryHandler(dnote_skip,pattern="^skip$"),MessageHandler(filters.TEXT&~filters.COMMAND,dnote_txt)],
+        },
+        fallbacks=[CommandHandler("cancel",cmd_cancel),CommandHandler("start",cmd_start),CallbackQueryHandler(on_main,pattern="^back$")],
+        allow_reentry=True,per_chat=True,
+    )
+    tgapp.add_handler(conv)
+    log.info("🤖 Bot (async) ishga tushdi!")
+    await tgapp.initialize()
+    await tgapp.start()
+    await tgapp.updater.start_polling(drop_pending_updates=True)
+    import asyncio
+    while True:
+        await asyncio.sleep(3600)
+
 # ════════════════════════════════════════════════
 # MAIN — Server + Bot bitta jarayonda
 # ════════════════════════════════════════════════
 if __name__=="__main__":
     log.info("🚀 FinApp ishga tushmoqda...")
-    # Bot alohida thread da
-    bot_thread=threading.Thread(target=run_bot,daemon=True)
-    bot_thread.start()
-    log.info(f"🌐 Flask server port {PORT} da ishlamoqda...")
-    from waitress import serve
-    serve(app, host="0.0.0.0", port=PORT)
+
+    def run_flask():
+        log.info(f"🌐 Flask port {PORT}")
+        app.run(host="0.0.0.0", port=PORT, use_reloader=False, threaded=True)
+
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    log.info("🤖 Bot ishga tushmoqda...")
+    if TOKEN:
+        import asyncio
+        asyncio.run(run_bot_async())
+    else:
+        log.error("BOT_TOKEN yo'q!")
+        import time
+        while True:
+            time.sleep(60)
