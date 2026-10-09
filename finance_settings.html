@@ -422,7 +422,7 @@
       el.textContent = '❌ Server bilan bog\'lanib bo\'lmadi';
       el.style.color = 'var(--red)';
     }
-  }
+  function toggleTheme(cb){
     Theme.set(cb.checked ? 'light' : 'dark');
     document.getElementById('theme-desc').textContent = cb.checked ? 'Light rejim faol' : 'Dark rejim faol';
     Toast.show(cb.checked?'☀️ Light rejim':'🌙 Dark rejim','info');
@@ -542,56 +542,148 @@
   let syncTimerInterval = null;
 
   function generateSyncCode() {
-    const code = SyncManager.generateCode();
-    if (!code) { Toast.show('Avval kiring!','warn'); return; }
+    const u = Auth.current();
+    if (!u) { Toast.show('Avval kiring!','warn'); return; }
 
-    const box = document.getElementById('sync-code-box');
+    // Barcha ma'lumotlarni yig'ish
+    const prefix = u.id + '_';
+    const keys = ['expenses','debts','notifs','budgets','recurring',
+                  'splits','goals','wallets','transfers'];
+    const dataObj = {};
+    keys.forEach(k => {
+      try { dataObj[k] = JSON.parse(localStorage.getItem(prefix+k)||'[]'); }
+      catch { dataObj[k] = []; }
+    });
+
+    const exported = {
+      v: 2,
+      user: Auth.getUsers().find(x => x.username === u.username) || u,
+      data: dataObj,
+      ts: Date.now()
+    };
+
+    // Base64 ga aylantirish
+    let b64;
+    try {
+      b64 = btoa(unescape(encodeURIComponent(JSON.stringify(exported))));
+    } catch(e) {
+      Toast.show('Eksport xatosi: ' + e.message, 'err'); return;
+    }
+
+    // 6 xonali kod yaratish
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random()*chars.length)];
+
+    // localStorage ga saqlash
+    localStorage.setItem('fin_sync_export', JSON.stringify({
+      key: code, data: b64,
+      expiresAt: Date.now() + 3600000
+    }));
+
+    // UI ga chiqarish
+    const box     = document.getElementById('sync-code-box');
     const display = document.getElementById('sync-code-display');
-    const timer = document.getElementById('sync-code-timer');
+    const timer   = document.getElementById('sync-code-timer');
+
+    if (!box || !display) { Toast.show('UI xatosi','err'); return; }
 
     display.textContent = code;
     box.style.display = 'block';
+    box.scrollIntoView({ behavior:'smooth', block:'center' });
 
-    // Timer — 60 daqiqa hisob
     let remaining = 3600;
     if (syncTimerInterval) clearInterval(syncTimerInterval);
     syncTimerInterval = setInterval(() => {
       remaining--;
       const m = Math.floor(remaining/60);
       const s = remaining % 60;
-      timer.textContent = `⏱ ${m}:${s.toString().padStart(2,'0')} qoldi`;
+      if (timer) timer.textContent = `⏱ ${m}:${s.toString().padStart(2,'0')} qoldi`;
       if (remaining <= 0) {
         clearInterval(syncTimerInterval);
         box.style.display = 'none';
         localStorage.removeItem('fin_sync_export');
-        Toast.show('Kod muddati tugadi. Yangi kod oling.','warn');
+        Toast.show('Kod muddati tugadi','warn');
       }
     }, 1000);
 
-    Toast.show(`Kod tayyor: ${code}`,'ok',5000);
+    Toast.show(`✅ Kod tayyor: ${code}`, 'ok', 6000);
   }
 
   function copySyncCode() {
     const code = document.getElementById('sync-code-display').textContent;
     if (!code) return;
-    navigator.clipboard.writeText(code).then(()=>{
-      Toast.show('Kod nusxa olindi ✅','ok');
-    }).catch(()=>{
-      prompt('Kodni nusxa oling:', code);
-    });
+    navigator.clipboard.writeText(code)
+      .then(() => Toast.show('Kod nusxa olindi ✅','ok'))
+      .catch(() => prompt('Kodni nusxa oling:', code));
   }
 
   function importSyncCode() {
     const code = document.getElementById('sync-code-input').value.trim().toUpperCase();
     if (code.length !== 6) { Toast.show('6 ta belgi kiriting!','warn'); return; }
 
-    const res = SyncManager.importByCode(code);
-    if (res.ok) {
-      Toast.show(`✅ Muvaffaqiyatli ulandi! Sahifa yangilanadi...`,'ok',3000);
+    // Saqlangan export ni tekshirish
+    const stored = localStorage.getItem('fin_sync_export');
+    if (!stored) {
+      Toast.show("Kod topilmadi! Kod olgan qurilmada bo'lishingiz kerak.",'err',5000);
+      return;
+    }
+
+    let entry;
+    try { entry = JSON.parse(stored); } catch { Toast.show('Xatolik','err'); return; }
+
+    if (entry.key !== code) {
+      Toast.show('Noto\'g\'ri kod!','err'); return;
+    }
+    if (Date.now() > entry.expiresAt) {
+      localStorage.removeItem('fin_sync_export');
+      Toast.show('Kod muddati tugagan. Yangi kod oling.','warn',5000); return;
+    }
+
+    // Import qilish
+    try {
+      const json = decodeURIComponent(escape(atob(entry.data)));
+      const imp  = JSON.parse(json);
+      if (!imp.user || !imp.data) { Toast.show("Noto'g'ri format",'err'); return; }
+
+      // Foydalanuvchini qo'shish
+      const users = Auth.getUsers();
+      const uname = imp.user.username.toLowerCase();
+      if (!users.find(u => u.username === uname)) {
+        users.push({
+          id:           imp.user.id || ('u_'+uname),
+          username:     uname,
+          displayName:  imp.user.displayName || (uname[0].toUpperCase()+uname.slice(1)),
+          password:     imp.user.password || '',
+          passwordHash: imp.user.passwordHash || '',
+          createdAt:    new Date().toISOString(),
+        });
+        Auth.saveUsers(users);
+      }
+
+      // Ma'lumotlarni import
+      const prefix = (imp.user.id || ('u_'+uname)) + '_';
+      let count = 0;
+      Object.entries(imp.data).forEach(([key, val]) => {
+        if (!Array.isArray(val)) return;
+        const existing = JSON.parse(localStorage.getItem(prefix+key)||'[]');
+        const existIds = new Set(existing.map(x => x.id));
+        val.forEach(item => {
+          if (item.id && !existIds.has(item.id)) {
+            existing.push(item); existIds.add(item.id); count++;
+          }
+        });
+        existing.sort((a,b)=>(b.createdAt||'').localeCompare(a.createdAt||''));
+        localStorage.setItem(prefix+key, JSON.stringify(existing));
+      });
+
+      Auth.setSession(imp.user);
       document.getElementById('sync-code-input').value = '';
-      setTimeout(() => { window.location.href = 'finance_dashboard.html'; }, 1500);
-    } else {
-      Toast.show('❌ ' + res.msg,'err',5000);
+      Toast.show(`✅ Ulandi! ${count} ta yangi yozuv ko'chirildi.`,'ok',4000);
+      setTimeout(() => window.location.href='finance_dashboard.html', 2000);
+
+    } catch(e) {
+      Toast.show('Import xatosi: '+e.message,'err');
     }
   }
 </script>
