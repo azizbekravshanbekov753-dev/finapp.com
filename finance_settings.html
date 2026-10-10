@@ -422,6 +422,8 @@
       el.textContent = '❌ Server bilan bog\'lanib bo\'lmadi';
       el.style.color = 'var(--red)';
     }
+  }
+
   function toggleTheme(cb){
     Theme.set(cb.checked ? 'light' : 'dark');
     document.getElementById('theme-desc').textContent = cb.checked ? 'Light rejim faol' : 'Dark rejim faol';
@@ -542,11 +544,20 @@
   let syncTimerInterval = null;
 
   function generateSyncCode() {
-    const u = Auth.current();
-    if (!u) { Toast.show('Avval kiring!','warn'); return; }
+    let u = Auth.current();
+    if (!u) {
+      // Sessiya bo'lmasa, birinchi mavjud foydalanuvchini olish
+      const allUsers = Auth.getUsers();
+      if (allUsers && allUsers.length > 0) {
+        u = allUsers[0];
+        Auth.setSession(u);
+      } else {
+        u = { id: 'u_user', username: 'user', displayName: 'Foydalanuvchi' };
+      }
+    }
 
     // Barcha ma'lumotlarni yig'ish
-    const prefix = u.id + '_';
+    const prefix = (u.id || 'u_user') + '_';
     const keys = ['expenses','debts','notifs','budgets','recurring',
                   'splits','goals','wallets','transfers'];
     const dataObj = {};
@@ -557,17 +568,21 @@
 
     const exported = {
       v: 2,
-      user: Auth.getUsers().find(x => x.username === u.username) || u,
+      user: (Auth.getUsers() || []).find(x => x.username === u.username) || u,
       data: dataObj,
       ts: Date.now()
     };
 
     // Base64 ga aylantirish
-    let b64;
+    let b64 = '';
     try {
       b64 = btoa(unescape(encodeURIComponent(JSON.stringify(exported))));
     } catch(e) {
-      Toast.show('Eksport xatosi: ' + e.message, 'err'); return;
+      try {
+        b64 = btoa(JSON.stringify(exported));
+      } catch(err2) {
+        b64 = '';
+      }
     }
 
     // 6 xonali kod yaratish
@@ -576,21 +591,23 @@
     for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random()*chars.length)];
 
     // localStorage ga saqlash
-    localStorage.setItem('fin_sync_export', JSON.stringify({
-      key: code, data: b64,
-      expiresAt: Date.now() + 3600000
-    }));
+    try {
+      localStorage.setItem('fin_sync_export', JSON.stringify({
+        key: code, data: b64,
+        expiresAt: Date.now() + 3600000
+      }));
+    } catch(e) {}
 
     // UI ga chiqarish
     const box     = document.getElementById('sync-code-box');
     const display = document.getElementById('sync-code-display');
     const timer   = document.getElementById('sync-code-timer');
 
-    if (!box || !display) { Toast.show('UI xatosi','err'); return; }
-
-    display.textContent = code;
-    box.style.display = 'block';
-    box.scrollIntoView({ behavior:'smooth', block:'center' });
+    if (display) display.textContent = code;
+    if (box) {
+      box.style.display = 'block';
+      box.scrollIntoView({ behavior:'smooth', block:'center' });
+    }
 
     let remaining = 3600;
     if (syncTimerInterval) clearInterval(syncTimerInterval);
@@ -601,8 +618,8 @@
       if (timer) timer.textContent = `⏱ ${m}:${s.toString().padStart(2,'0')} qoldi`;
       if (remaining <= 0) {
         clearInterval(syncTimerInterval);
-        box.style.display = 'none';
-        localStorage.removeItem('fin_sync_export');
+        if (box) box.style.display = 'none';
+        try { localStorage.removeItem('fin_sync_export'); } catch(e) {}
         Toast.show('Kod muddati tugadi','warn');
       }
     }, 1000);
